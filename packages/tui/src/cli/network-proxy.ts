@@ -19,6 +19,7 @@ export type TuiProxyConfiguration =
 
 export interface ConfigureTuiNetworkProxyOptions {
   readonly environment?: NodeJS.ProcessEnv;
+  readonly warn?: (message: string) => void;
   readonly createProxyDispatcher?: (options: {
     httpProxy: string;
     httpsProxy: string;
@@ -30,6 +31,7 @@ export interface ConfigureTuiNetworkProxyOptions {
 
 export function resolveTuiProxyConfiguration(
   environment: NodeJS.ProcessEnv = process.env,
+  warn?: (message: string) => void,
 ): TuiProxyConfiguration {
   const allProxy = firstProxyValue(environment, 'ALL_PROXY', 'all_proxy');
   const httpProxy = firstProxyValue(environment, 'HTTP_PROXY', 'http_proxy') ?? allProxy;
@@ -37,13 +39,19 @@ export function resolveTuiProxyConfiguration(
     firstProxyValue(environment, 'HTTPS_PROXY', 'https_proxy') ?? allProxy ?? httpProxy;
 
   if (!httpProxy && !httpsProxy) return { mode: 'direct' };
-  validateProxyValue(httpProxy);
-  validateProxyValue(httpsProxy);
+  const validHttpProxy = validateProxyValue(httpProxy, warn);
+  // ALL_PROXY feeds both slots; validating the identical value twice would
+  // duplicate the unsupported-scheme warning for a single variable.
+  const validHttpsProxy =
+    httpsProxy === httpProxy ? validHttpProxy : validateProxyValue(httpsProxy, warn);
+
+  // If every configured proxy was an unsupported scheme, fall back to direct.
+  if (!validHttpProxy && !validHttpsProxy) return { mode: 'direct' };
 
   return {
     mode: 'proxy',
-    httpProxy: httpProxy?.value ?? '',
-    httpsProxy: httpsProxy?.value ?? '',
+    httpProxy: validHttpProxy?.value ?? '',
+    httpsProxy: validHttpsProxy?.value ?? '',
     noProxy: withLoopbackNoProxy(environment.NO_PROXY ?? environment.no_proxy),
   };
 }
@@ -51,7 +59,7 @@ export function resolveTuiProxyConfiguration(
 export function configureTuiNetworkProxy(
   options: ConfigureTuiNetworkProxyOptions = {},
 ): TuiProxyConfiguration {
-  const configuration = resolveTuiProxyConfiguration(options.environment);
+  const configuration = resolveTuiProxyConfiguration(options.environment, options.warn);
   if (configuration.mode === 'direct') return configuration;
 
   const createProxyDispatcher =
@@ -77,17 +85,30 @@ function firstProxyValue(
   return undefined;
 }
 
-function validateProxyValue(proxy: ProxyValue | undefined): void {
-  if (!proxy) return;
+function validateProxyValue(
+  proxy: ProxyValue | undefined,
+  warn?: (message: string) => void,
+): ProxyValue | undefined {
+  if (!proxy) return undefined;
   let url: URL;
   try {
     url = new URL(proxy.value);
   } catch {
+    // Completely unparseable value — always an error regardless of scheme.
     throw new Error(`${proxy.name} must be an http:// or https:// URL.`);
   }
-  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || !url.hostname) {
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    // Unsupported scheme (e.g. socks5:) — warn and ignore so the CLI can still start.
+    warn?.(
+      `Warning: ${proxy.name} uses unsupported scheme "${url.protocol.slice(0, -1)}"; ` +
+        `only http and https proxies are supported. Ignoring ${proxy.name}.\n`,
+    );
+    return undefined;
+  }
+  if (!url.hostname) {
     throw new Error(`${proxy.name} must be an http:// or https:// URL.`);
   }
+  return proxy;
 }
 
 function withLoopbackNoProxy(existing: string | undefined): string {

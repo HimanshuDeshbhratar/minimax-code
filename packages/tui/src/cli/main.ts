@@ -96,6 +96,7 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
   try {
     (dependencies.configureNetworkProxy ?? configureTuiNetworkProxy)({
       environment: processRef.env,
+      warn: (msg) => processRef.stderr.write(msg),
     });
     const createProgram = dependencies.createProgram ?? createTuiProgram;
     await createProgram({
